@@ -1,79 +1,72 @@
-# from fastapi import FastAPI
+# main.py
+from fastapi import FastAPI, Depends, HTTPException
+from typing import List
+from database import get_db, engine
+from models import Base, Product as ProductModel
+from schemas import ProductCreate, Product, ProductUpdate
+from sqlalchemy.future import select
+from sqlalchemy.orm import Session
+from contextlib import asynccontextmanager
 
-# app = FastAPI()
+@asynccontextmanager      # 비동기 컨텍스트 관리자 정의
+async def lifespan(app: FastAPI):     
+    async with engine.begin() as conn:    # 비동기 컨텍스트 시작
+        # 데이터베이스 테이블 생성
+        await conn.run_sync(Base.metadata.create_all)     # 모든 DB 테이블 생성
+    
+    try:
+        yield  # 여기에서 FastAPI 앱이 실행되는 동안 컨텍스트를 유지합니다.
+    finally:
+        # 비동기 데이터베이스 연결 종료
+        await engine.dispose()
+        
+app = FastAPI(lifespan=lifespan)
 
-# @app.get('/')
-# def read_root():
-#   return {"Hello" : "World"}
+# @app.on_event("startup")
+# async def startup_event():
+#     async with engine.begin() as conn:
+#         await conn.run_sync(Base.metadata.create_all)
 
-# @app.get("/items/{item_id}")
-# def read_item(item_id: int, q: str = None):
-#   return {"item_id" : item_id, "q" : q}
+@app.get("/products/", response_model=List[Product])    # 제품목록을 나타내는 리스트 반환
+async def read_products(db: Session = Depends(get_db)):
+    result = await db.execute(select(ProductModel))   # await 키워드 = 비동기적 실행
+    products = result.scalars().all()   # 결과 집합을 각 행의 스칼라 값으로 반환 및 모든 행 리스트로 반환
+    return products
+    
+@app.post("/products/", response_model=Product)   # 새 제품 생성
+async def create_product(product: ProductCreate, db: Session = Depends(get_db)):
+    db_product = ProductModel(**product.model_dump())
+    db.add(db_product)    # 새 제품 추가 및 커밋
+    await db.commit()
+    await db.refresh(db_product)
+    return db_product
 
-# # /products/<int:item_id>/
+@app.get("/products/{product_id}", response_model=Product)
+async def read_product(product_id: int, db: Session = Depends(get_db)):
+    result = await db.execute(select(ProductModel).where(ProductModel.id == product_id))
+    product = result.scalars().first()
+    if product:
+        return product
+    raise HTTPException(status_code=404, detail="Product not found")
 
-# @app.get('/like/lion')
-# def response_lion():
-#   return {"응답" : "멋쨍이 사자!"}
+@app.put("/products/{product_id}", response_model=Product)
+async def update_product(product_id: int, product: ProductUpdate, db: Session = Depends(get_db)):
+    db_product = await db.execute(select(ProductModel).where(ProductModel.id == product_id))
+    db_product = db_product.scalars().first()
+    if not db_product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    for var, value in product.dict(exclude_unset=True).items():
+        setattr(db_product, var, value)
+    await db.commit()
+    await db.refresh(db_product)
+    return db_product
 
-
-# CRUD (Create, Read, Update, Delete) by FastAPI
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-
-app = FastAPI()
-
-class Item(BaseModel):
-  name : str
-  description: str = None
-  price : float
-  tax : float = None
-
-@app.post('/items/')
-def create_item(item : Item):
-  return {"name" : item.name, "price" : item.price}
-
-@app.get('/items/{item_id}')
-def read_item(item_id : int):
-  return {"item_id" : item_id, "name" : "Sample Item"}
-
-@app.put('/items/{item_id}')
-def update_item(item_id : int, item : Item):
-  return {"item_id" : item_id, 'name' : Item.name, "price" : Item.price}
-
-@app.delete('/items/{item_id}')
-def delete_item(item_id : int):
-  return {"message" : "Item deleted"}
-
-
-### 연습문제 
-# 1. 학생 정보 조회 
-# "/likelion/{student_id}" 경로를 GET 메서드로 설정하고, 
-# 요청된 student_id에 대응하는 멋쟁이사자처럼 학원의 학생 정보를 반환하는 엔드포인트
-# 학생 정보는 JSON 객체로, 학생의 이름과 이메일을 포함
-# 이때, 각 student_id에 따라 하드코딩된 데이터를 제공
-@app.get('/likelion/{student_id}')
-def read_student(student_id : int):
-  student_data = {
-        1: {"name": "김멋사", "email": "kimmutsa@example.com"},
-        2: {"name": "이멋사", "email": "leemutsa@example.com"} 
-  }
-  student_info = student_data.get(student_id, {"message": "Student not found"})
-  return student_info
-
-
-# 2. 프로젝트 아이템 등록
-# "/projects/" 경로에 POST 메서드를 사용하여, 
-# 멋쟁이사자처럼 학생들이 진행하는 프로젝트 아이템 정보를 받아 새로운 프로젝트를 등록하는 엔드포인트
-# 요청 본문으로는 Item 모델을 활용하며, 프로젝트의 이름과 짧은 설명을 반환
-@app.post('/projects/')
-def create_project(item: Item):
-  return {'name' : item.name, 'description' : item.description}
-
-# 3. 프로젝트 아이템 삭제
-# "/projects/{project_id}" 경로에 DELETE 메서드를 사용하여,
-# 요청된 project_id에 해당하는 프로젝트 아이템을 삭제하는 엔드포인트
-# 삭제가 성공시, "Project deleted successfully" 메시지 반환
-@app.delete('/projects/{project_id}')
-def delete_project(project_id : int):
-  return {"message" : "Project deleted successfully"} 
+@app.delete("/products/{product_id}", status_code=204)
+async def delete_product(product_id: int, db: Session = Depends(get_db)):
+    db_product = await db.execute(select(ProductModel).where(ProductModel.id == product_id))
+    db_product = db_product.scalars().first()
+    if not db_product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    await db.delete(db_product)
+    await db.commit()
+    return {"ok": True}
